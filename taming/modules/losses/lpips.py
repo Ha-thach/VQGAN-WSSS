@@ -5,11 +5,14 @@ import torch.nn as nn
 from torchvision import models
 from collections import namedtuple
 
-from taming.util import get_ckpt_path
+from taming.utils import get_ckpt_path
 
 
-class LPIPS(nn.Module):
-    # Learned perceptual metric
+class LPIPS(nn.Module): 
+    """
+    Purpose: Learned Perceptual Image Patch Similarity (LPIPS) to keep perceptual quality of VQVAE reconstructions
+
+    """
     def __init__(self, use_dropout=True):
         super().__init__()
         self.scaling_layer = ScalingLayer()
@@ -39,15 +42,16 @@ class LPIPS(nn.Module):
         return model
 
     def forward(self, input, target):
-        in0_input, in1_input = (self.scaling_layer(input), self.scaling_layer(target))
-        outs0, outs1 = self.net(in0_input), self.net(in1_input)
-        feats0, feats1, diffs = {}, {}, {}
-        lins = [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4]
+        # measure the difference between input and target
+        in0_input, in1_input = (self.scaling_layer(input), self.scaling_layer(target)) # scale to VGG input range
+        outs0, outs1 = self.net(in0_input), self.net(in1_input) # get feature maps from VGG. 0 for input , 1 for target
+        feats0, feats1, diffs = {}, {}, {} # features and differences. 0 for input , 1 for target, 
+        lins = [self.lin0, self.lin1, self.lin2, self.lin3, self.lin4] # list of linear layers: 5 levels of feature maps
         for kk in range(len(self.chns)):
             feats0[kk], feats1[kk] = normalize_tensor(outs0[kk]), normalize_tensor(outs1[kk])
-            diffs[kk] = (feats0[kk] - feats1[kk]) ** 2
+            diffs[kk] = (feats0[kk] - feats1[kk]) ** 2 # squared difference between input and target features
 
-        res = [spatial_average(lins[kk].model(diffs[kk]), keepdim=True) for kk in range(len(self.chns))]
+        res = [spatial_average(lins[kk].model(diffs[kk]), keepdim=True) for kk in range(len(self.chns))] # weighted difference at each level
         val = res[0]
         for l in range(1, len(self.chns)):
             val += res[l]
@@ -55,6 +59,7 @@ class LPIPS(nn.Module):
 
 
 class ScalingLayer(nn.Module):
+    """A layer to shift and scale input images to match the VGG training distribution"""
     def __init__(self):
         super(ScalingLayer, self).__init__()
         self.register_buffer('shift', torch.Tensor([-.030, -.088, -.188])[None, :, None, None])

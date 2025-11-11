@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch import einsum
-from einops import rearrange
+from einops import rearrange #to work (process and arrange) with tensors effectively than torch and numpy
 
 
 class VectorQuantizer(nn.Module):
@@ -28,7 +28,7 @@ class VectorQuantizer(nn.Module):
         self.e_dim = e_dim
         self.beta = beta
 
-        self.embedding = nn.Embedding(self.n_e, self.e_dim)
+        self.embedding = nn.Embedding(self.n_e, self.e_dim) #Codebook lưu ma trận trọng số có shape là n_e * e_dim
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
 
     def forward(self, z):
@@ -52,12 +52,12 @@ class VectorQuantizer(nn.Module):
 
         ## could possible replace this here
         # #\start...
-        # find closest encodings
+        # find closest encodings bằng cách tính argmin để lấy vị trí
         min_encoding_indices = torch.argmin(d, dim=1).unsqueeze(1)
 
         min_encodings = torch.zeros(
             min_encoding_indices.shape[0], self.n_e).to(z)
-        min_encodings.scatter_(1, min_encoding_indices, 1)
+        min_encodings.scatter_(1, min_encoding_indices, 1) #tạo ma trận one-hot với hàng i có giá trị 1 ở cột là code được chọn (còn lại 0).
 
         # dtype min encodings: torch.float32
         # min_encodings shape: torch.Size([2048, 512])
@@ -221,10 +221,10 @@ class VectorQuantizer2(nn.Module):
     def __init__(self, n_e, e_dim, beta, remap=None, unknown_index="random",
                  sane_index_shape=False, legacy=True):
         super().__init__()
-        self.n_e = n_e
-        self.e_dim = e_dim
-        self.beta = beta
-        self.legacy = legacy
+        self.n_e = n_e # number of embeddings
+        self.e_dim = e_dim # Dimension of embedding
+        self.beta = beta # commitment cost used in loss term, beta * ||z_e(x)-sg[e]||^2
+        self.legacy = legacy #
 
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
@@ -245,6 +245,7 @@ class VectorQuantizer2(nn.Module):
         self.sane_index_shape = sane_index_shape
 
     def remap_to_used(self, inds):
+        # R
         ishape = inds.shape
         assert len(ishape)>1
         inds = inds.reshape(ishape[0],-1)

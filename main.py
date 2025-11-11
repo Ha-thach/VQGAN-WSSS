@@ -11,15 +11,10 @@ from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
 from pytorch_lightning.utilities import rank_zero_only
 
+from taming.utils import get_obj_from_str, instantiate_from_config
 from taming.data.utils import custom_collate
 
 
-def get_obj_from_str(string, reload=False):
-    module, cls = string.rsplit(".", 1)
-    if reload:
-        module_imp = importlib.import_module(module)
-        importlib.reload(module_imp)
-    return getattr(importlib.import_module(module, package=None), cls)
 
 
 def get_parser(**parser_kwargs):
@@ -35,8 +30,8 @@ def get_parser(**parser_kwargs):
 
     parser = argparse.ArgumentParser(**parser_kwargs)
     parser.add_argument(
-        "-n",
-        "--name",
+        "-n", # short name of this flag
+        "--name", # long name of this flag. Name means name to save for logs dir
         type=str,
         const=True,
         default="",
@@ -45,7 +40,7 @@ def get_parser(**parser_kwargs):
     )
     parser.add_argument(
         "-r",
-        "--resume",
+        "--resume", # continue training from this logdir or checkpoint
         type=str,
         const=True,
         default="",
@@ -54,7 +49,7 @@ def get_parser(**parser_kwargs):
     )
     parser.add_argument(
         "-b",
-        "--base",
+        "--base", # base config files
         nargs="*",
         metavar="base_config.yaml",
         help="paths to base configs. Loaded from left-to-right. "
@@ -63,7 +58,7 @@ def get_parser(**parser_kwargs):
     )
     parser.add_argument(
         "-t",
-        "--train",
+        "--train", # whether to train the model
         type=str2bool,
         const=True,
         default=False,
@@ -106,20 +101,28 @@ def get_parser(**parser_kwargs):
     return parser
 
 
-def nondefault_trainer_args(opt):
-    parser = argparse.ArgumentParser()
-    parser = Trainer.add_argparse_args(parser)
-    args = parser.parse_args([])
+def nondefault_trainer_args(opt): # find all arguments which are different from default 
+    parser = argparse.ArgumentParser() # create a new parser
+    parser = Trainer.add_argparse_args(parser) # add all default trainer args
+    args = parser.parse_args([]) #Thêm tất cả tham số mặc định của Trainer
     return sorted(k for k in vars(args) if getattr(opt, k) != getattr(args, k))
 
 
-def instantiate_from_config(config):
+def instantiate_from_config(config): 
+    """
+    function instantiate_from_config(cfg):
+    assert "target" in cfg
+    ClassRef = get_obj_from_str(cfg["target"])
+    kwargs   = cfg.get("params", {})
+    return ClassRef(**kwargs)
+    """
+
     if not "target" in config:
         raise KeyError("Expected key `target` to instantiate.")
     return get_obj_from_str(config["target"])(**config.get("params", dict()))
 
 
-class WrappedDataset(Dataset):
+class WrappedDataset(Dataset): # dataset list-like
     """Wraps an arbitrary object with __len__ and __getitem__ into a pytorch dataset"""
     def __init__(self, dataset):
         self.data = dataset
@@ -131,7 +134,35 @@ class WrappedDataset(Dataset):
         return self.data[idx]
 
 
-class DataModuleFromConfig(pl.LightningDataModule):
+class DataModuleFromConfig(pl.LightningDataModule): # Pytorch Lightning DataModule helps to initiate data loaders from file config yaml
+    """
+    It is a LightningDataModule that separates the data configuration (dataset and dataloader) from the code, allowing you to easily switch datasets just by editing the YAML config file, without modifying the code.
+    
+    class DataModuleFromConfig:
+    init(batch_size, train=None, validation=None, test=None, wrap=False, num_workers=None):
+        store dataset_configs for provided splits
+        set loader funcs to _train/_val/_test if split exists
+        self.wrap = wrap
+        self.num_workers = num_workers or batch_size * 2
+
+    prepare_data():
+        for each split cfg in dataset_configs:
+            instantiate_from_config(cfg)   # trigger downloads/prep if dataset does it
+
+    setup(stage=None):
+        self.datasets = {k: instantiate_from_config(cfg) for k,cfg in dataset_configs}
+        if wrap: self.datasets[k] = WrappedDataset(self.datasets[k])
+
+    _train_dataloader():
+        return DataLoader(datasets["train"], batch_size, num_workers, shuffle=True, collate_fn=custom_collate)
+
+    _val_dataloader():
+        return DataLoader(datasets["validation"], batch_size, num_workers, collate_fn=custom_collate)
+
+    _test_dataloader():
+        return DataLoader(datasets["test"], batch_size, num_workers, collate_fn=custom_collate)
+
+    """
     def __init__(self, batch_size, train=None, validation=None, test=None,
                  wrap=False, num_workers=None):
         super().__init__()
@@ -176,15 +207,31 @@ class DataModuleFromConfig(pl.LightningDataModule):
 
 
 class SetupCallback(Callback):
+    """
+    Callback to be called at the beginning of training.
+    Creates log directories and saves config files.
+    class SetupCallback(Callback):
+    init(resume, now, logdir, ckptdir, cfgdir, config, lightning_config)
+
+    on_pretrain_routine_start(trainer, pl_module):
+        if global_rank == 0:
+            mkdir logdir, ckptdir, cfgdir
+            print + save project config        -> cfgdir/<now>-project.yaml
+            print + save lightning config      -> cfgdir/<now>-lightning.yaml
+        else:
+            if not resume and exists(logdir):
+                move logdir -> child_runs/<name>
+
+    """
     def __init__(self, resume, now, logdir, ckptdir, cfgdir, config, lightning_config):
         super().__init__()
-        self.resume = resume
-        self.now = now
-        self.logdir = logdir
-        self.ckptdir = ckptdir
-        self.cfgdir = cfgdir
-        self.config = config
-        self.lightning_config = lightning_config
+        self.resume = resume # continue training from this logdir or checkpoint
+        self.now = now # current date/time for naming logdir
+        self.logdir = logdir # main log directory
+        self.ckptdir = ckptdir # checkpoint directory
+        self.cfgdir = cfgdir # config directory
+        self.config = config # project config: model, data, losses, transforms, any experiment-specific hyperparams
+        self.lightning_config = lightning_config # lightning config: trainer, logger, model checkpoint, callbacks
 
     def on_pretrain_routine_start(self, trainer, pl_module):
         if trainer.global_rank == 0:
@@ -194,12 +241,12 @@ class SetupCallback(Callback):
             os.makedirs(self.cfgdir, exist_ok=True)
 
             print("Project config")
-            print(self.config.pretty())
+            print(OmegaConf.to_yaml(self.config)) # Convert config to YAML format for printing
             OmegaConf.save(self.config,
-                           os.path.join(self.cfgdir, "{}-project.yaml".format(self.now)))
+                           os.path.join(self.cfgdir, "{}-project.yaml".format(self.now))) # save config file vs self.now chính là mốc thời gian (timestamp) hoặc tên phiên chạy hiện tại, dùng để tạo tên file config có gắn thời gian
 
             print("Lightning config")
-            print(self.lightning_config.pretty())
+            print(OmegaConf.to_yaml(self.lightning_config))
             OmegaConf.save(OmegaConf.create({"lightning": self.lightning_config}),
                            os.path.join(self.cfgdir, "{}-lightning.yaml".format(self.now)))
 
@@ -216,21 +263,46 @@ class SetupCallback(Callback):
 
 
 class ImageLogger(Callback):
-    def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True):
-        super().__init__()
+    """
+    class ImageLogger(Callback):
+    init(batch_frequency, max_images, clamp=True, increase_log_steps=True):
         self.batch_freq = batch_frequency
         self.max_images = max_images
-        self.logger_log_images = {
+        self.log_steps = [1,2,4,8,..., batch_freq] if increase_log_steps else [batch_freq]
+        self.logger_log_images = {WandbLogger: _wandb, TestTubeLogger: _testtube}
+
+    check_frequency(batch_idx) -> bool:
+        return (batch_idx % batch_freq == 0) or (batch_idx in log_steps and pop_first(log_steps))
+
+    log_img(pl_module, batch, batch_idx, split):
+        if not (check_frequency & pl_module.has_log_images & max_images>0): return
+        was_training = pl_module.training; set eval
+        with no_grad: images = pl_module.log_images(batch, split, pl_module)
+        trim to N<=max_images, detach+cpu, clamp to [-1,1] if needed
+        log_local(save_dir, split, images, step, epoch, batch_idx)
+        pick logger-specific func and log
+        restore train if needed
+
+    log_local(save_dir, split, images, step, epoch, batch_idx):
+        for each key -> grid(images[key], nrow=4)
+        map [-1,1]→[0,1], convert to uint8, save PNG to save_dir/images/split/...
+
+    """
+    def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True):
+        super().__init__()
+        self.batch_freq = batch_frequency # frequency of logging
+        self.max_images = max_images
+        self.logger_log_images = { 
             pl.loggers.WandbLogger: self._wandb,
             pl.loggers.TestTubeLogger: self._testtube,
-        }
+        } # `logger_log_images` is a dictionary that maps specific logger classes to their corresponding image logging methods. This allows the ImageLogger callback to support multiple logging backends by associating each backend with its own method for logging images.
         self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
-        if not increase_log_steps:
+        if not increase_log_steps: # increase the logging steps to check more frequently at the beginning of training 
             self.log_steps = [self.batch_freq]
-        self.clamp = clamp
+        self.clamp = clamp # whether to clamp the images to be in the range [-1, 1] before converting to (0, 1) for logging
 
-    @rank_zero_only
-    def _wandb(self, pl_module, images, batch_idx, split):
+    @rank_zero_only # decorator ensures that the decorated method is only executed on the process with rank 0 in a distributed training setup. This is important for logging to avoid duplicate entries from multiple processes.
+    def _wandb(self, pl_module, images, batch_idx, split): # wandb: weights and biases
         raise ValueError("No way wandb")
         grids = dict()
         for k in images:
@@ -315,7 +387,24 @@ class ImageLogger(Callback):
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         self.log_img(pl_module, batch, batch_idx, split="val")
 
-
+def get_num_gpus(trainer_config):
+        """Parse number of GPUs from trainer config"""
+        if "gpus" not in trainer_config:
+            return 0
+        gpus = trainer_config["gpus"]
+    
+        if gpus is None:
+            return 0
+        elif isinstance(gpus, int):
+            return gpus
+        elif isinstance(gpus, str):
+        # Handle "0,1" or "0," formats
+            gpu_list = [x.strip() for x in gpus.strip(",").split(',') if x.strip()]
+            return len(gpu_list)
+        elif isinstance(gpus, (list, tuple)):
+            return len(gpus)
+        else:
+            return 0
 
 if __name__ == "__main__":
     # custom parser to specify config files, train, test and debug mode,
@@ -359,7 +448,7 @@ if __name__ == "__main__":
     #           params:
     #               key: value
 
-    now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S") # current date/time for naming logdir
 
     # add cwd for convenience and to make classes in this file available when
     # running as `python main.py`
@@ -369,7 +458,9 @@ if __name__ == "__main__":
     parser = get_parser()
     parser = Trainer.add_argparse_args(parser)
 
+
     opt, unknown = parser.parse_known_args()
+    # resume means continuing training from this logdir or checkpoint
     if opt.name and opt.resume:
         raise ValueError(
             "-n/--name and -r/--resume cannot be specified both."
@@ -379,30 +470,30 @@ if __name__ == "__main__":
     if opt.resume:
         if not os.path.exists(opt.resume):
             raise ValueError("Cannot find {}".format(opt.resume))
-        if os.path.isfile(opt.resume):
-            paths = opt.resume.split("/")
-            idx = len(paths)-paths[::-1].index("logs")+1
-            logdir = "/".join(paths[:idx])
-            ckpt = opt.resume
-        else:
+        if os.path.isfile(opt.resume): # if resume is a file, then it is a checkpoint file
+            paths = opt.resume.split("/") # split path into components by "/" and save into a list 
+            idx = len(paths)-paths[::-1].index("logs")+1 # find the index of "logs" in the reversed list and calculate its index in the original list
+            logdir = "/".join(paths[:idx]) # path of log directory
+            ckpt = opt.resume # path of checkpoint file (whole path) 
+        else: # if resume is a directory, then it is a log directory, and the checkpoint file is "last.ckpt" in the "checkpoints" subdirectory
             assert os.path.isdir(opt.resume), opt.resume
             logdir = opt.resume.rstrip("/")
-            ckpt = os.path.join(logdir, "checkpoints", "last.ckpt")
+            ckpt = os.path.join(logdir, "checkpoints", "last.ckpt") # path of checkpoint file
 
         opt.resume_from_checkpoint = ckpt
-        base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml")))
+        base_configs = sorted(glob.glob(os.path.join(logdir, "configs/*.yaml"))) # find all config files in the "configs" subdirectory of the log directory => sort them alphabetically
         opt.base = base_configs+opt.base
-        _tmp = logdir.split("/")
+        _tmp = logdir.split("/")    
         nowname = _tmp[_tmp.index("logs")+1]
     else:
-        if opt.name:
+        if opt.name: # if name is specified, use it as the name of the log directory
             name = "_"+opt.name
-        elif opt.base:
+        elif opt.base: #
             cfg_fname = os.path.split(opt.base[0])[-1]
             cfg_name = os.path.splitext(cfg_fname)[0]
             name = "_"+cfg_name
         else:
-            name = ""
+            name = "" #
         nowname = now+name+opt.postfix
         logdir = os.path.join("logs", nowname)
 
@@ -412,17 +503,17 @@ if __name__ == "__main__":
 
     try:
         # init and save configs
-        configs = [OmegaConf.load(cfg) for cfg in opt.base]
-        cli = OmegaConf.from_dotlist(unknown)
-        config = OmegaConf.merge(*configs, cli)
-        lightning_config = config.pop("lightning", OmegaConf.create())
-        # merge trainer cli with config
-        trainer_config = lightning_config.get("trainer", OmegaConf.create())
+        configs = [OmegaConf.load(cfg) for cfg in opt.base] # load all config files specified in opt.base into a list of OmegaConf objects
+        cli = OmegaConf.from_dotlist(unknown) # convert command line arguments of the form `--key value` or `--nested.key value` into an OmegaConf object and save it into cli
+        config = OmegaConf.merge(*configs, cli) # merge all config files and command line arguments into a single OmegaConf object. Left-most configs take precedence over right-most ones
+        lightning_config = config.pop("lightning", OmegaConf.create()) # pop the "lightning" key from config if it exists, otherwise create an empty OmegaConf object
+        # trainer: gpu or cpu
+        trainer_config = lightning_config.get("trainer", OmegaConf.create()) 
         # default to ddp
-        trainer_config["distributed_backend"] = "ddp"
-        for k in nondefault_trainer_args(opt):
+        trainer_config["distributed_backend"] = "ddp" 
+        for k in nondefault_trainer_args(opt): # find all arguments which are different from default
             trainer_config[k] = getattr(opt, k)
-        if not "gpus" in trainer_config:
+        if not "gpus" in trainer_config: #
             del trainer_config["distributed_backend"]
             cpu = True
         else:
@@ -474,7 +565,9 @@ if __name__ == "__main__":
                 "dirpath": ckptdir,
                 "filename": "{epoch:06}",
                 "verbose": True,
+                "save_top_k": -1,
                 "save_last": True,
+                "monitor": None,
             }
         }
         if hasattr(model, "monitor"):
@@ -484,8 +577,8 @@ if __name__ == "__main__":
 
         modelckpt_cfg = lightning_config.modelcheckpoint or OmegaConf.create()
         modelckpt_cfg = OmegaConf.merge(default_modelckpt_cfg, modelckpt_cfg)
-        trainer_kwargs["checkpoint_callback"] = instantiate_from_config(modelckpt_cfg)
-
+        ckpt_callback = instantiate_from_config(modelckpt_cfg)    
+        
         # add callback which sets up log directory
         default_callbacks_cfg = {
             "setup_callback": {
@@ -518,8 +611,11 @@ if __name__ == "__main__":
         }
         callbacks_cfg = lightning_config.callbacks or OmegaConf.create()
         callbacks_cfg = OmegaConf.merge(default_callbacks_cfg, callbacks_cfg)
-        trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
-
+        #trainer_kwargs["callbacks"] = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+        callbacks_list = [instantiate_from_config(callbacks_cfg[k]) for k in callbacks_cfg]
+        callbacks_list.append(ckpt_callback)
+        trainer_kwargs["callbacks"] = callbacks_list    
+        trainer_kwargs["checkpoint_callback"] = True
         trainer = Trainer.from_argparse_args(trainer_opt, **trainer_kwargs)
 
         # data
@@ -529,11 +625,15 @@ if __name__ == "__main__":
         # lightning still takes care of proper multiprocessing though
         data.prepare_data()
         data.setup()
-
+    
         # configure learning rate
         bs, base_lr = config.data.params.batch_size, config.model.base_learning_rate
         if not cpu:
-            ngpu = len(lightning_config.trainer.gpus.strip(",").split(','))
+            ngpu = get_num_gpus(lightning_config.trainer)
+            if ngpu == 0:
+                print("Warning: GPU requested but gpus config is 0 or invalid. Using CPU.")
+                ngpu = 1
+                cpu = True
         else:
             ngpu = 1
         accumulate_grad_batches = lightning_config.trainer.accumulate_grad_batches or 1

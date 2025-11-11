@@ -6,7 +6,9 @@ from torch.utils.data import Dataset, ConcatDataset
 
 
 class ConcatDatasetWithIndex(ConcatDataset):
-    """Modified from original pytorch code to return dataset idx"""
+    """Modified from original pytorch code to return dataset idx
+    Function: combine multiple datasets and return the dataset index along with sample
+    """
     def __getitem__(self, idx):
         if idx < 0:
             if -idx > len(self):
@@ -21,13 +23,16 @@ class ConcatDatasetWithIndex(ConcatDataset):
 
 
 class ImagePaths(Dataset):
+    """
+    Expects a list of paths to images.
+    """
     def __init__(self, paths, size=None, random_crop=False, labels=None):
         self.size = size
         self.random_crop = random_crop
 
         self.labels = dict() if labels is None else labels
-        self.labels["file_path_"] = paths
-        self._length = len(paths)
+        self.labels["file_path_"] = paths # store file paths in a special label
+        self._length = len(paths) 
 
         if self.size is not None and self.size > 0:
             self.rescaler = albumentations.SmallestMaxSize(max_size = self.size)
@@ -42,7 +47,7 @@ class ImagePaths(Dataset):
     def __len__(self):
         return self._length
 
-    def preprocess_image(self, image_path):
+    def preprocess_image(self, image_path): # load image and preprocess to [-1,1]
         image = Image.open(image_path)
         if not image.mode == "RGB":
             image = image.convert("RGB")
@@ -57,12 +62,13 @@ class ImagePaths(Dataset):
         for k in self.labels:
             example[k] = self.labels[k][i]
         return example
-
+ 
 
 class NumpyPaths(ImagePaths):
+    # Override to load numpy arrays
     def preprocess_image(self, image_path):
-        image = np.load(image_path).squeeze(0)  # 3 x 1024 x 1024
-        image = np.transpose(image, (1,2,0))
+        image = np.load(image_path).squeeze(0)  
+        image = np.transpose(image, (1,2,0)) # C,H,W -> H,W,C
         image = Image.fromarray(image, mode="RGB")
         image = np.array(image).astype(np.uint8)
         image = self.preprocessor(image=image)["image"]

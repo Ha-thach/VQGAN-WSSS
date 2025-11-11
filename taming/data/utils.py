@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from taming.data.helper_types import Annotation
-from torch._six import string_classes
+
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format
 from tqdm import tqdm
 
-
+string_classes = (str, bytes)
 def unpack(path):
     if path.endswith("tar.gz"):
         with tarfile.open(path, "r:gz") as tar:
@@ -126,6 +126,11 @@ def custom_collate(batch):
 
     elem = batch[0]
     elem_type = type(elem)
+
+    # Handle None values (e.g., masks for training data without ground truth)
+    if elem is None:
+        return None
+
     if isinstance(elem, torch.Tensor):
         out = None
         if torch.utils.data.get_worker_info() is not None:
@@ -133,7 +138,7 @@ def custom_collate(batch):
             # shared memory tensor to avoid an extra copy
             numel = sum([x.numel() for x in batch])
             storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage)
+            out = elem.new(storage).resize_(0)  # Resize to 0 to allow proper resizing
         return torch.stack(batch, 0, out=out)
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':
@@ -155,14 +160,15 @@ def custom_collate(batch):
         return {key: custom_collate([d[key] for d in batch]) for key in elem}
     elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
         return elem_type(*(custom_collate(samples) for samples in zip(*batch)))
-    if isinstance(elem, collections.abc.Sequence) and isinstance(elem[0], Annotation):  # added
+    if isinstance(elem, collections.abc.Sequence) and len(elem) > 0 and isinstance(elem[0], Annotation):  # added
         return batch  # added
     elif isinstance(elem, collections.abc.Sequence):
         # check to make sure that the elements in batch have consistent size
         it = iter(batch)
         elem_size = len(next(it))
         if not all(len(elem) == elem_size for elem in it):
-            raise RuntimeError('each element in list of batch should be of equal size')
+            # If sizes are inconsistent, return batch as-is (e.g., variable-length lists like cls_names)
+            return batch
         transposed = zip(*batch)
         return [custom_collate(samples) for samples in transposed]
 

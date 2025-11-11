@@ -1,0 +1,82 @@
+model:
+  base_learning_rate: 4.5e-6
+  target: taming.models.vqgan.VQModel
+  params:
+    embed_dim: 256
+    n_embed: 1024
+    ddconfig:
+      double_z: False
+      z_channels: 256
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult: [1, 2, 4, 8]  
+      num_res_blocks: 2
+      attn_resolutions: [16]
+      dropout: 0.0
+
+    lossconfig:
+      target: taming.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
+      params:
+        disc_conditional: False
+        disc_in_channels: 3
+        disc_start: 2000
+        disc_weight: 0.8
+        codebook_weight: 1.0
+        disc_loss: "hinge"
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 5
+    num_workers: 4
+    train:
+      target: taming.data.bcss_wsss.BCSSWSSSTrainDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/training
+        size: 256
+        has_mask : False
+    validation:
+      target: taming.data.bcss_wsss.BCSSWSSSValidationDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/valid
+        size: 256
+        has_mask : True
+
+    test:
+      target: taming.data.bcss_wsss.BCSSWSSSTestDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/test
+        size: 256
+        has_mask : True
+
+
+
+lightning:
+  trainer:
+    gpus: 0      # CPU; dùng MPS thì xoá dòng này và thêm accelerator: mps
+    max_epochs: 100
+    precision: 32
+    accumulate_grad_batches: 1
+    log_every_n_steps: 50
+    limit_train_batches: 1.0
+    limit_val_batches: 1.0
+
+  modelcheckpoint:
+    target: pytorch_lightning.callbacks.ModelCheckpoint
+    params:
+      save_top_k: 3
+      monitor: val/rec_loss
+      mode: min
+      save_last: True     # quan trọng để reload
+      filename: "epoch-{epoch:02d}-{val_rec_loss:.4f}"
+
+  callbacks:
+
+  logger:
+    target: pytorch_lightning.loggers.TensorBoardLogger
+    params:
+      save_dir: "./logs/"
+      name: "bcss_wsss_vqgan"
+      version: ""    # ignore create subfolder

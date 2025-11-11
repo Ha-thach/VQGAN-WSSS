@@ -18,6 +18,12 @@ def adopt_weight(weight, global_step, threshold=0, value=0.):
 
 
 def hinge_d_loss(logits_real, logits_fake):
+    """
+    Hinge loss for the discriminator
+    logits_real: discriminator outputs on real images
+    logits_fake: discriminator outputs on fake images
+    returns: hinge loss
+    """
     loss_real = torch.mean(F.relu(1. - logits_real))
     loss_fake = torch.mean(F.relu(1. + logits_fake))
     d_loss = 0.5 * (loss_real + loss_fake)
@@ -25,6 +31,9 @@ def hinge_d_loss(logits_real, logits_fake):
 
 
 def vanilla_d_loss(logits_real, logits_fake):
+    """
+    Vanilla loss for the discriminator
+    """
     d_loss = 0.5 * (
         torch.mean(torch.nn.functional.softplus(-logits_real)) +
         torch.mean(torch.nn.functional.softplus(logits_fake)))

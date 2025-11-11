@@ -36,6 +36,16 @@ def Normalize(in_channels):
 
 
 class Upsample(nn.Module):
+    """
+    class Upsample:
+    init(C, with_conv):
+        if with_conv: conv3x3(C->C)
+
+    forward(x):
+        x = interpolate(x, scale=2, mode="nearest")
+        if with_conv: x = conv3x3(x)
+        return x
+    """
     def __init__(self, in_channels, with_conv):
         super().__init__()
         self.with_conv = with_conv
@@ -54,6 +64,20 @@ class Upsample(nn.Module):
 
 
 class Downsample(nn.Module):
+    """
+    class Downsample:
+    init(C, with_conv):
+        if with_conv: conv3x3(C->C, stride=2, padding=0)  # we'll pad manually
+
+    forward(x):
+        if with_conv:
+            x = pad(x, (left=0,right=1,top=0,bottom=1), value=0)
+            x = conv_stride2(x)
+        else:
+            x = avg_pool2d(x, kernel=2, stride=2)
+        return x
+
+    """
     def __init__(self, in_channels, with_conv):
         super().__init__()
         self.with_conv = with_conv
@@ -76,6 +100,20 @@ class Downsample(nn.Module):
 
 
 class ResnetBlock(nn.Module):
+    """
+    class ResnetBlock:
+    init(in_ch, out_ch, temb_channels, dropout):
+        norm1, conv1(3x3), norm2, dropout, conv2(3x3)
+        if in_ch != out_ch: shortcut = conv(1x1)
+        if temb_channels: temb_proj = Linear(temb_channels -> out_ch)
+
+    forward(x, temb=None):
+        h = norm1(x) -> swish -> conv1
+        if temb: h = h + temb_proj(swish(temb)) broadcast to H,W
+        h = norm2(h) -> swish -> dropout -> conv2
+        shortcut = x or 1x1(x)
+        return shortcut + h
+"""
     def __init__(self, *, in_channels, out_channels=None, conv_shortcut=False,
                  dropout, temb_channels=512):
         super().__init__()
@@ -138,6 +176,20 @@ class ResnetBlock(nn.Module):
 
 
 class AttnBlock(nn.Module):
+    """
+    class AttnBlock:
+    init(C):
+        norm, q=conv1x1(C->C), k=conv1x1, v=conv1x1, proj_out=conv1x1
+
+    forward(x):
+        h = norm(x)
+        q = q(h); k = k(h); v = v(h)          # (B,C,H,W)
+        reshape to (B, HW, C) / (B, C, HW) as needed
+        attn = softmax( (q @ k) / sqrt(C), dim=last )  # (B, HW, HW)
+        out  = v @ attn^T -> reshape (B,C,H,W)
+        out  = proj_out(out)
+        return x + out
+"""
     def __init__(self, in_channels):
         super().__init__()
         self.in_channels = in_channels
@@ -193,6 +245,41 @@ class AttnBlock(nn.Module):
 
 
 class Model(nn.Module):
+    """
+    class Model:
+    init(params):
+        conv_in: in_channels -> ch
+        if use_timestep: temb_mlp: ch -> 4ch -> 4ch
+        DOWN path (ModuleList over resolutions):
+            per level:
+                block: [ResnetBlock]*num_res_blocks
+                attn:  [AttnBlock]*num_res_blocks (maybe empty if not at attn_res)
+                optional Downsample (except last level)
+        MID:
+            block_1 (ResnetBlock), attn_1 (AttnBlock), block_2 (ResnetBlock)
+        UP path (reverse of down):
+            per level:
+                block: [ResnetBlock]*(num_res_blocks+1)   # +1 for first cat with skip
+                attn:  [AttnBlock]*(num_res_blocks+1)
+                optional Upsample (except top level)
+        norm_out -> swish -> conv_out: ch -> out_ch
+
+    forward(x, t=None):
+        temb = TimestepMLP(t) if use_timestep else None
+        hs = [conv_in(x)]
+        for each level:
+            for each resblock:
+                h = block(hs[-1], temb); if attn: h = attn(h)
+                hs.append(h)
+            if not last level: hs.append(Downsample(hs[-1]))
+        h = hs[-1]; h = mid.block_1(h, temb); h = mid.attn_1(h); h = mid.block_2(h, temb)
+        for each level reversed:
+            for i in range(num_res_blocks+1):
+                h = ResBlock(cat(h, hs.pop(), dim=1), temb)
+                if attn: h = attn(h)
+            if level > 0: h = Upsample(h)
+        return conv_out(swish(norm_out(h)))
+"""
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, use_timestep=True):
@@ -340,6 +427,22 @@ class Model(nn.Module):
 
 
 class Encoder(nn.Module):
+    """
+    class Encoder: #down only to latent
+    init(params):
+        conv_in
+        DOWN path identical to Model
+        MID: ResBlock -> Attn -> ResBlock
+        norm_out -> swish -> conv_out(3x3)
+        z_out: conv1x1 to z_channels (double_z? output mean+logvar)
+
+    forward(x):
+        hs as in Model down
+        h = mid blocks
+        h = norm_out -> swish -> conv_out
+        z = z_out(h)   # (B, z_channels, Hmin, Wmin) or 2*z_channels if double_z
+        return z
+"""
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, double_z=True, **ignore_kwargs):
@@ -434,6 +537,23 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
+    """
+    class Decoder:
+    init(params):
+        compute z_shape for logging (1, z_channels, res_min, res_min)
+        z_in: conv(3x3) to block channels at bottom
+        MID: ResBlock -> Attn -> ResBlock
+        UP path: per level, [ResBlock]*num_res_blocks (+Attn?), then Upsample (except top)
+        norm_out -> swish -> (optional pre_end) -> conv_out(3x3) to out_ch
+
+    forward(z):
+        h = z_in(z)
+        h = mid blocks
+        for each level reversed:
+            run blocks (+attn), then upsample except top
+        h = norm_out -> swish -> conv_out
+        return h
+"""
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, z_channels, give_pre_end=False, **ignorekwargs):
@@ -538,6 +658,37 @@ class Decoder(nn.Module):
 
 
 class VUNet(nn.Module):
+    """
+    class VUNet: #VUNet (two-input UNet: condition path down, main path up, with latent z fused at mid)
+    init(params):
+        conv_in_x: for main input x
+        conv_in_c: for condition c   (or reuse conv_in with separate path)
+        (optional) TimestepMLP
+        DOWN path (built for conditioning branch):
+            per level: [ResBlock]*N (+Attn?), then Downsample (except last)
+        z_in: conv to align z channels at bottleneck
+        MID: ResBlock -> Attn -> ResBlock
+        UP path (for main input):
+            per level: [ResBlock]*(N+1) (+Attn?), Upsample (except top)
+        norm_out -> swish -> conv_out
+
+    forward(x, z, t=None, c=None):
+        temb = TimestepMLP(t) if enabled
+        # Down on condition branch c (or x if design differs)
+        hs = [conv_in(c)]
+        for level: push blocks (and attn), push downsample (except last)
+        # Mid: fuse latent
+        h = hs[-1]
+        h = cat(h, z_in(z), dim=1)  # fuse z at bottleneck
+        h = mid blocks
+        # Up on main branch
+        for level reversed:
+            for i in range(N+1):
+                h = ResBlock(cat(h, hs.pop()), temb)
+                if attn: h = attn(h)
+            if level>0: h = Upsample(h)
+        return conv_out(swish(norm_out(h)))
+"""
     def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True,
                  in_channels, c_channels,

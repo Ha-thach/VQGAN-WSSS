@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from torch.utils.data import Dataset
 
 from taming.data.base import ImagePaths
-from taming.util import download, retrieve
+from taming.utils import download, retrieve
 import taming.data.utils as bdu
 
 

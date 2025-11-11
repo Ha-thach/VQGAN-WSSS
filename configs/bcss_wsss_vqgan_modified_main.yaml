@@ -1,0 +1,43 @@
+model:
+  target: taming.models.vqgan.VQModel
+  base_learning_rate: 4.5e-6
+  params:
+    embed_dim: 256
+    n_embed: 1024
+    ddconfig:
+      double_z: False
+      z_channels: 256
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult: [1, 2, 4, 8]  # depth của encoder/decoder
+      num_res_blocks: 2
+      attn_resolutions: [16]
+      dropout: 0.0
+    lossconfig:
+      target: taming.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
+      params:
+        disc_conditional: False
+        disc_in_channels: 3
+        disc_start: 2000 # bước sau mới bắt đầu training discriminator
+        disc_weight: 0.75
+        codebook_weight: 1.0
+        disc_loss: "hinge"
+
+data:
+  params:
+    batch_size: 5
+    num_workers: 4
+
+    train:
+      target: taming.data.bcss_wsss.BCSSWSSSDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP- WSSS/vqgan-wsss/data/sub_BCSS_WSSS/training
+        mask_type: None   # train autoencoder chỉ cần ảnh
+
+    validation:
+      target: taming.data.bcss_wsss.BCSSWSSSDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP- WSSS/vqgan-wsss/data/sub_BCSS_WSSS/valid/img
+        mask_type: pseudo_label   # val có pseudo masks để log/đánh giá thêm

@@ -42,7 +42,7 @@ class VQModel(pl.LightningModule):
             self.monitor = monitor
 
     def init_from_ckpt(self, path, ignore_keys=list()):
-        sd = torch.load(path, map_location="cpu")["state_dict"]
+        sd = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
         keys = list(sd.keys())
         for k in keys:
             for ik in ignore_keys:
@@ -110,11 +110,14 @@ class VQModel(pl.LightningModule):
         discloss, log_dict_disc = self.loss(qloss, x, xrec, 1, self.global_step,
                                             last_layer=self.get_last_layer(), split="val")
         rec_loss = log_dict_ae["val/rec_loss"]
+        # Log val/rec_loss explicitly with custom settings
         self.log("val/rec_loss", rec_loss,
                    prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
         self.log("val/aeloss", aeloss,
                    prog_bar=True, logger=True, on_step=True, on_epoch=True, sync_dist=True)
-        self.log_dict(log_dict_ae)
+        # Remove val/rec_loss from log_dict_ae to avoid duplicate logging
+        log_dict_ae_filtered = {k: v for k, v in log_dict_ae.items() if k != "val/rec_loss"}
+        self.log_dict(log_dict_ae_filtered)
         self.log_dict(log_dict_disc)
         return self.log_dict
 
