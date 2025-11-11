@@ -1,0 +1,92 @@
+model:
+  base_learning_rate: 1.0e-6  # Lower LR for finetuning
+  target: taming.models.vqgan_freeze_encoder.GumbelVQFreezeEncoder
+  params:
+    ckpt_path: logs/vqgan_gumbel_f8/checkpoints/last.ckpt
+    ignore_keys: ["loss."]  # Ignore loss module keys from pretrained
+    freeze_encoder: True  # Freeze encoder, train all other modules
+    kl_weight: 1.0e-08
+    embed_dim: 256
+    n_embed: 8192
+    monitor: val/rec_loss
+    temperature_scheduler_config:
+      target: taming.lr_scheduler.LambdaWarmUpCosineScheduler
+      params:
+        warm_up_steps: 0
+        max_decay_steps: 100000
+        lr_start: 0.9
+        lr_max: 0.9
+        lr_min: 1.0e-06
+    ddconfig:
+      double_z: False
+      z_channels: 256
+      resolution: 256
+      in_channels: 3
+      out_ch: 3
+      ch: 128
+      ch_mult: [1, 1, 2, 4]  # Match Gumbel pretrained model
+      num_res_blocks: 2
+      attn_resolutions: [32]
+      dropout: 0.0
+
+    lossconfig:
+      target: taming.modules.losses.vqperceptual.VQLPIPSWithDiscriminator
+      params:
+        disc_conditional: False
+        disc_in_channels: 3
+        disc_start: 2000  # Start discriminator after 2000 steps
+        disc_weight: 0.8
+        codebook_weight: 1.0
+        disc_loss: "hinge"
+
+data:
+  target: main.DataModuleFromConfig
+  params:
+    batch_size: 5
+    num_workers: 4
+    train:
+      target: taming.data.bcss_wsss.BCSSWSSSTrainDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/training
+        size: 256
+        has_mask : False
+    validation:
+      target: taming.data.bcss_wsss.BCSSWSSSValidationDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/valid
+        size: 256
+        has_mask : True
+    test:
+      target: taming.data.bcss_wsss.BCSSWSSSTestDataset
+      params:
+        img_root: /Users/thachha/Desktop/AIO2025-official/AIMA/CP-WSSS/taming-transformers/data/sub_BCSS_WSSS/test
+        size: 256
+        has_mask : True
+
+lightning:
+  trainer:
+    gpus: 0      # CPU (PyTorch Lightning 1.4.2 doesn't support MPS)
+    max_epochs: 20
+    precision: 32
+    accumulate_grad_batches: 1
+    log_every_n_steps: 50
+    limit_train_batches: 1.0
+    limit_val_batches: 1.0
+
+  modelcheckpoint:
+    target: pytorch_lightning.callbacks.ModelCheckpoint
+    params:
+      save_top_k: 3
+      monitor: val/rec_loss
+      mode: min
+      save_last: True
+      filename: "epoch-{epoch:02d}-{val_rec_loss:.4f}"
+
+  callbacks:
+
+  logger:
+    target: pytorch_lightning.loggers.TensorBoardLogger
+    params:
+      save_dir: "./logs/"
+      name: "bcss_wsss_vqgan_finetune_gumbel_freeze_encoder"
+      version: ""

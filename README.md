@@ -33,8 +33,11 @@ data/BCSS_WSSS/
 ```
 
 ### 3. Edit Config
+1. Download the checkpoint of pre-trained model 
+- Go to scripts/download_pretrained.ipynb -> download
+- Recheck the ckpt path in the yaml file: model/params/ckpt_path
 
-Update data paths in `configs/bcss_wsss_vqgan.yaml`:
+2. Update data paths at "img_root" in the yaml file `configsbcss_wsss_vqgan_finetune_gumbel.yaml`in case you wanna finetune with Gumbel (freeze encoder)
 
 ```yaml
 data:
@@ -54,23 +57,12 @@ data:
 
 **Option A: Train from scratch**
 ```bash
-python main.py -t --base configs/bcss_wsss_vqgan.yaml
+python main.py -t --base configs/bcss_wsss_vqgan_finetune_gumbel.yaml
 ```
-
-**Option B: Finetune from pretrained model**
+### 5. Check logging
 ```bash
-# 1. Download or use existing pretrained checkpoint (check logs/ folder)
-# 2. Extract VQGAN weights if using transformer checkpoint:
-python extract_vqgan_weights.py \
-  --input logs/faceshq_transformer/checkpoints/last.ckpt \
-  --output logs/faceshq_pretrained/checkpoints/last.ckpt
-
-# 3. Update ckpt_path in finetune config, then run:
-python main.py -t --base configs/bcss_wsss_vqgan_finetune_faceshq.yaml
+tensorboard --logdir logs/bcss_wsss_vqgan_finetune_gumbel_freeze_encoder
 ```
-
-**Note**: Make sure the `ch_mult` parameter in your config matches the pretrained model architecture.
-
 ---
 
 ## References
