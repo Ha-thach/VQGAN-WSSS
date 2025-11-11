@@ -55,7 +55,6 @@ data:
 
 ### 4. Train
 
-**Option A: Train from scratch**
 ```bash
 python main.py -t --base configs/bcss_wsss_vqgan_finetune_gumbel.yaml
 ```
