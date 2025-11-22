@@ -97,8 +97,124 @@ python token_classification/train_token_classifier.py \
 ### Step 3: Evaluate Model
 
 ```bash
-# TODO: Add evaluation script
+python token_classification/evaluate_token_classifier.py \
+  --test-token-dir token_maps/test \
+  --checkpoint outputs/token_vit/best_model.pth \
+  --output-dir outputs/token_vit/test_results
 ```
+
+**Output:**
+- `test_metrics.json`: Detailed metrics (precision, recall, F1, IoU)
+- `predictions.csv`: Per-image predictions with probabilities
+- `predictions.npy`, `labels.npy`, `probabilities.npy`: Raw numpy arrays
+
+---
+
+## 🎯 From Classification to Segmentation
+
+The token classifier predicts **image-level labels** (which classes exist in the image). To get **pixel-level segmentation**, use one of these methods:
+
+### Method 1: CAM (Class Activation Mapping) ⭐ Recommended for Quick Start
+
+**Use your existing trained image classifier** - no retraining needed!
+
+```bash
+python scripts/infer_segmentation_from_classifier.py \
+  --method cam \
+  --checkpoint outputs/token_vit/best_model.pth \
+  --token-map-path token_maps/test/sample[0101].npy \
+  --output-dir outputs/segmentation
+```
+
+**Pros:**
+- No retraining required
+- Works with existing image classifier
+- Fast inference
+
+**Cons:**
+- Only highlights discriminative regions
+- Lower accuracy than full segmentation
+
+**How it works:**
+1. Use classifier's attention weights to identify important spatial regions
+2. For each predicted class, find which tokens contributed most
+3. Upsample token-level activations to pixel-level
+
+---
+
+### Method 2: Token-Level Segmentation (Best Accuracy)
+
+Train a **per-token classifier** that predicts class for each 32×32 token position, then upsample to 256×256 pixels.
+
+#### Step 1: Train Segmentation Model
+
+```bash
+python token_classification/train_segmentation_model.py \
+  --train-token-dir token_maps/train \
+  --train-mask-dir data/sub_BCSS_WSSS/training/mask \
+  --val-token-dir token_maps/val \
+  --val-mask-dir data/sub_BCSS_WSSS/valid/mask \
+  --output-dir outputs/token_seg
+```
+
+#### Step 2: Generate Segmentation
+
+```bash
+python scripts/infer_segmentation_from_classifier.py \
+  --method token-level \
+  --checkpoint outputs/token_seg/best_model.pth \
+  --token-map-path token_maps/test/sample[0101].npy \
+  --output-dir outputs/segmentation
+```
+
+**Pros:**
+- Most accurate segmentation
+- End-to-end trainable
+- Preserves spatial structure
+
+**Cons:**
+- Requires pixel-level masks for training
+- More training time
+
+**Architecture:**
+```
+Token Map [32, 32]
+    ↓
+Token Embedding [32, 32, 768]
+    ↓
+ViT Encoder [32×32, 768]
+    ↓
+Per-Token Classifier [32, 32, 4]  ← No pooling!
+    ↓
+Transposed Conv Upsampling
+    ↓
+Segmentation [256, 256, 4]
+```
+
+---
+
+### Method 3: Batch Processing
+
+Process entire test set:
+
+```bash
+python scripts/infer_segmentation_from_classifier.py \
+  --method batch \
+  --checkpoint outputs/token_vit/best_model.pth \
+  --token-dir token_maps/test \
+  --output-dir outputs/segmentation_batch
+```
+
+**Output:**
+- `*_seg.png`: RGB colored segmentation
+- `*_seg.npy`: Class indices array
+
+**Color Scheme:**
+- Red: TUM (Tumor)
+- Green: STR (Stroma)
+- Blue: LYM (Lymphocytic infiltrate)
+- Yellow: NEC (Necrosis)
+- Black: Background
 
 ---
 
@@ -269,10 +385,33 @@ P mode palette indices:
 
 | Script | Purpose |
 |--------|---------|
+| **Token Map Generation** | |
 | `generate_token_map.py` | Generate token maps from images (for training data) |
 | `generate_token_map_for_valid_test.py` | Generate token maps with labels from masks (for val/test) |
-| `train_token_classifier.py` | Train TokenViT classifier |
+| **Image Classification** | |
+| `train_token_classifier.py` | Train TokenViT image classifier |
+| `evaluate_token_classifier.py` | Evaluate classifier on test set |
 | `dataset.py` | Dataset classes for loading token maps |
+| **Segmentation** | |
+| `train_segmentation_model.py` | Train token-level segmentation model |
+| `infer_segmentation_from_classifier.py` | Convert classification to segmentation (3 methods) |
+| **Models** | |
+| `taming/models/token_classifier.py` | Image classification models |
+| `taming/models/token_classifier_segmentation.py` | Segmentation models (TokenViTSegmentation) |
+
+---
+
+## 🔄 Comparison: Classification vs Segmentation
+
+| Aspect | Image Classification | Token-Level Segmentation | CAM-Based |
+|--------|---------------------|-------------------------|-----------|
+| **Output** | Image-level labels | Pixel-level masks | Pseudo pixel-level |
+| **Training Data** | Token maps + labels | Token maps + pixel masks | Token maps + labels |
+| **Accuracy** | High for presence/absence | Highest for localization | Moderate |
+| **Training Time** | Fast (30-50 epochs) | Moderate (50-100 epochs) | None (uses existing) |
+| **Inference Speed** | Very fast | Fast | Fast |
+| **Use Case** | "Does image contain TUM?" | "Where exactly is TUM?" | Quick localization |
+| **Best For** | Initial screening | Final segmentation | Prototyping, pseudo-labels |
 
 ---
 
@@ -316,8 +455,59 @@ After training:
 
 ## 🚀 Next Steps
 
-1. Implement evaluation script
-2. Add inference pipeline for new images
-3. Visualize attention maps
-4. Analyze misclassified samples
-5. Try ensemble methods
+- [x] ✅ Implement evaluation script (`evaluate_token_classifier.py`)
+- [x] ✅ Add inference pipeline for segmentation (CAM and token-level methods)
+- [x] ✅ Decode classification activations to segmentation
+- [ ] Visualize attention maps from transformer layers
+- [ ] Analyze misclassified samples in detail
+- [ ] Try ensemble methods (multiple models/checkpoints)
+- [ ] Implement data augmentation for segmentation training
+- [ ] Add multi-scale inference for better segmentation
+- [ ] Export to ONNX for production deployment
+
+---
+
+## 📊 Typical Workflow
+
+### For Image-Level Classification Only:
+```bash
+# 1. Generate token maps
+python token_classification/generate_token_map_for_valid_test.py ...
+
+# 2. Train classifier
+python token_classification/train_token_classifier.py ...
+
+# 3. Evaluate
+python token_classification/evaluate_token_classifier.py ...
+```
+
+### For Pixel-Level Segmentation (Method 1 - Quick):
+```bash
+# 1-3. Same as above
+
+# 4. Generate segmentation using CAM
+python scripts/infer_segmentation_from_classifier.py --method cam ...
+```
+
+### For Pixel-Level Segmentation (Method 2 - Best Quality):
+```bash
+# 1. Generate token maps
+
+# 2. Train segmentation model
+python token_classification/train_segmentation_model.py ...
+
+# 3. Generate segmentation
+python scripts/infer_segmentation_from_classifier.py --method token-level ...
+```
+
+---
+
+## 🤝 Contributing
+
+If you find bugs or have suggestions:
+1. Check existing issues
+2. Create detailed bug report with:
+   - Command used
+   - Error message
+   - Python/PyTorch versions
+   - Expected vs actual behavior

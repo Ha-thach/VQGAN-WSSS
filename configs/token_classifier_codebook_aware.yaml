@@ -1,0 +1,35 @@
+# Configuration for Codebook-Aware Token Classifier
+# This model uses pre-computed token-to-class statistics as additional features
+
+model:
+  model_type: codebook_aware
+  num_tokens: 8192           # Codebook size
+  embed_dim: 256             # Token embedding dimension
+  num_classes: 4             # TUM, STR, LYM, NEC
+  token_class_count_path: codebook_analysis_bcss_gumbel8/token_class_count.npy
+  num_layers: 6              # Number of transformer layers
+  num_heads: 8               # Number of attention heads
+  dropout: 0.1               # Dropout rate
+  multi_label: true          # Multi-label classification
+  learning_rate: 0.0001      # Initial learning rate
+  weight_decay: 0.01         # Weight decay for AdamW
+
+data:
+  token_dir: codebook_analysis_bcss_gumbel8  # Directory with token .npy files
+  data_dir: data/sub_BCSS_WSSS                # BCSS-WSSS dataset directory
+  num_classes: 4
+  multi_label: true
+
+training:
+  batch_size: 32
+  max_epochs: 100
+  num_workers: 4
+  accelerator: auto          # 'cpu', 'gpu', 'mps', or 'auto'
+  devices: 1
+  seed: 42
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  precision: 32              # 16, 32, or 'bf16'
+  early_stopping: true
+  patience: 15
+  output_dir: logs/token_classifier_codebook_aware

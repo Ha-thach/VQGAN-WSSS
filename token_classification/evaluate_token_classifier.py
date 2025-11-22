@@ -1,356 +1,344 @@
 """
-Evaluation and Inference script for Token Classifier
+Evaluate Token Classifier on Test Set
+Simple evaluation script matching train_token_classifier.py architecture
 """
 
 import os
+import sys
 import argparse
-import yaml
+import json
+import csv
 from pathlib import Path
 
 import torch
-import numpy as np
+import torch.nn as nn
 from torch.utils.data import DataLoader
+import numpy as np
+from sklearn.metrics import precision_recall_fscore_support
 from tqdm import tqdm
-from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    hamming_loss
-)
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-from taming.data.token_classification import build_token_classification_dataset
-from taming.models.token_classifier import build_token_classifier
+# Add parent to path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from token_classification.dataset import build_token_dataset
+from token_classification.train_token_classifier import TokenViT, collate_fn
 
 
-def load_config(config_path):
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+@torch.no_grad()
+def evaluate(model, dataloader, device):
+    """
+    Evaluate model on dataset
 
-
-def load_model(config, checkpoint_path):
-    """Load model from checkpoint"""
-    model = build_token_classifier(config['model'])
-
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    model.load_state_dict(checkpoint['state_dict'])
-    model.eval()
-
-    return model
-
-
-def evaluate_multi_label(model, dataloader, device, class_names):
-    """Evaluate multi-label classification model"""
-    model = model.to(device)
+    Returns:
+        dict with detailed metrics
+    """
     model.eval()
 
     all_preds = []
-    all_probs = []
     all_labels = []
-    all_image_names = []
+    all_probs = []
+    all_file_paths = []
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc='Evaluating'):
-            tokens = batch['tokens'].to(device)
-            labels = batch['labels']
+    print("\nEvaluating...")
+    for batch in tqdm(dataloader, desc='Testing'):
+        tokens = batch['tokens'].to(device)
+        labels = batch['cls_label'].to(device)
 
-            # Forward pass
-            logits = model(tokens)
-            probs = torch.sigmoid(logits).cpu().numpy()
-            preds = (probs > 0.5).astype(int)
+        # Forward
+        logits = model(tokens)
+        probs = torch.sigmoid(logits)
+        preds = (probs > 0.5).cpu().numpy()
 
-            all_preds.append(preds)
-            all_probs.append(probs)
-            all_labels.append(labels.numpy())
-            all_image_names.extend(batch['image_name'])
+        all_preds.append(preds)
+        all_labels.append(labels.cpu().numpy())
+        all_probs.append(probs.cpu().numpy())
+        all_file_paths.extend(batch['file_path_'])
 
     # Concatenate all batches
     all_preds = np.vstack(all_preds)
-    all_probs = np.vstack(all_probs)
     all_labels = np.vstack(all_labels)
+    all_probs = np.vstack(all_probs)
 
-    # Calculate metrics
+    # Compute metrics
     metrics = {}
 
-    # Overall metrics
-    metrics['hamming_loss'] = hamming_loss(all_labels, all_preds)
-    metrics['exact_match_ratio'] = accuracy_score(all_labels, all_preds)
+    # Exact match accuracy
+    exact_match = (all_preds == all_labels).all(axis=1).mean()
+    metrics['exact_match'] = float(exact_match)
 
     # Per-class metrics
     precision, recall, f1, support = precision_recall_fscore_support(
         all_labels, all_preds, average=None, zero_division=0
     )
 
-    # Calculate AUC for each class
-    auc_scores = []
-    for i in range(len(class_names)):
-        try:
-            auc = roc_auc_score(all_labels[:, i], all_probs[:, i])
-            auc_scores.append(auc)
-        except:
-            auc_scores.append(0.0)
+    # Macro averages
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average='macro', zero_division=0
+    )
 
-    # Store per-class metrics
-    for i, class_name in enumerate(class_names):
-        metrics[f'{class_name}_precision'] = precision[i]
-        metrics[f'{class_name}_recall'] = recall[i]
-        metrics[f'{class_name}_f1'] = f1[i]
-        metrics[f'{class_name}_auc'] = auc_scores[i]
-        metrics[f'{class_name}_support'] = support[i]
-
-    # Macro and micro averages
-    metrics['macro_precision'] = np.mean(precision)
-    metrics['macro_recall'] = np.mean(recall)
-    metrics['macro_f1'] = np.mean(f1)
-    metrics['macro_auc'] = np.mean(auc_scores)
-
-    # Micro average
+    # Micro averages
     precision_micro, recall_micro, f1_micro, _ = precision_recall_fscore_support(
         all_labels, all_preds, average='micro', zero_division=0
     )
-    metrics['micro_precision'] = precision_micro
-    metrics['micro_recall'] = recall_micro
-    metrics['micro_f1'] = f1_micro
 
-    return metrics, all_preds, all_probs, all_labels, all_image_names
+    metrics['per_class'] = {
+        'precision': precision.tolist(),
+        'recall': recall.tolist(),
+        'f1': f1.tolist(),
+        'support': support.tolist()
+    }
+
+    metrics['macro'] = {
+        'precision': float(precision_macro),
+        'recall': float(recall_macro),
+        'f1': float(f1_macro)
+    }
+
+    metrics['micro'] = {
+        'precision': float(precision_micro),
+        'recall': float(recall_micro),
+        'f1': float(f1_micro)
+    }
+
+    # Sample accuracy (at least one correct class per sample)
+    sample_acc = (all_preds == all_labels).any(axis=1).mean()
+    metrics['sample_accuracy'] = float(sample_acc)
+
+    # Hamming loss
+    hamming_loss = (all_preds != all_labels).mean()
+    metrics['hamming_loss'] = float(hamming_loss)
+
+    return metrics, all_preds, all_labels, all_probs, all_file_paths
 
 
-def evaluate_single_label(model, dataloader, device, class_names):
-    """Evaluate single-label classification model"""
-    model = model.to(device)
-    model.eval()
+def print_metrics(metrics, class_names=['TUM', 'STR', 'LYM', 'NEC']):
+    """Print metrics in readable format"""
 
-    all_preds = []
-    all_probs = []
-    all_labels = []
-    all_image_names = []
+    print(f"\n{'='*60}")
+    print("EVALUATION RESULTS")
+    print(f"{'='*60}")
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc='Evaluating'):
-            tokens = batch['tokens'].to(device)
-            labels = batch['labels']
+    print(f"\nOverall Metrics:")
+    print(f"  Exact Match Accuracy: {metrics['exact_match']:.4f}")
+    print(f"  Sample Accuracy:      {metrics['sample_accuracy']:.4f}")
+    print(f"  Hamming Loss:         {metrics['hamming_loss']:.4f}")
 
-            # Forward pass
-            logits = model(tokens)
-            probs = torch.softmax(logits, dim=1).cpu().numpy()
-            preds = np.argmax(probs, axis=1)
+    print(f"\nMacro-averaged Metrics:")
+    print(f"  Precision: {metrics['macro']['precision']:.4f}")
+    print(f"  Recall:    {metrics['macro']['recall']:.4f}")
+    print(f"  F1-score:  {metrics['macro']['f1']:.4f}")
 
-            all_preds.append(preds)
-            all_probs.append(probs)
-            all_labels.append(labels.numpy())
-            all_image_names.extend(batch['image_name'])
+    print(f"\nMicro-averaged Metrics:")
+    print(f"  Precision: {metrics['micro']['precision']:.4f}")
+    print(f"  Recall:    {metrics['micro']['recall']:.4f}")
+    print(f"  F1-score:  {metrics['micro']['f1']:.4f}")
 
-    # Concatenate all batches
-    all_preds = np.concatenate(all_preds)
-    all_probs = np.vstack(all_probs)
-    all_labels = np.concatenate(all_labels)
+    print(f"\nPer-class Metrics:")
+    print(f"{'Class':<10} {'Precision':<12} {'Recall':<12} {'F1':<12} {'Support':<12}")
+    print("-" * 60)
 
-    # Calculate metrics
-    metrics = {}
-
-    # Overall accuracy
-    metrics['accuracy'] = accuracy_score(all_labels, all_preds)
-
-    # Per-class metrics
-    precision, recall, f1, support = precision_recall_fscore_support(
-        all_labels, all_preds, average=None, zero_division=0
-    )
-
-    # Calculate AUC (one-vs-rest)
-    auc_scores = []
-    for i in range(len(class_names)):
-        try:
-            binary_labels = (all_labels == i).astype(int)
-            auc = roc_auc_score(binary_labels, all_probs[:, i])
-            auc_scores.append(auc)
-        except:
-            auc_scores.append(0.0)
-
-    # Store per-class metrics
     for i, class_name in enumerate(class_names):
-        metrics[f'{class_name}_precision'] = precision[i]
-        metrics[f'{class_name}_recall'] = recall[i]
-        metrics[f'{class_name}_f1'] = f1[i]
-        metrics[f'{class_name}_auc'] = auc_scores[i]
-        metrics[f'{class_name}_support'] = support[i]
+        prec = metrics['per_class']['precision'][i]
+        rec = metrics['per_class']['recall'][i]
+        f1 = metrics['per_class']['f1'][i]
+        sup = int(metrics['per_class']['support'][i])
 
-    # Macro and weighted averages
-    metrics['macro_precision'] = np.mean(precision)
-    metrics['macro_recall'] = np.mean(recall)
-    metrics['macro_f1'] = np.mean(f1)
-    metrics['macro_auc'] = np.mean(auc_scores)
+        print(f"{class_name:<10} {prec:<12.4f} {rec:<12.4f} {f1:<12.4f} {sup:<12}")
 
-    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
-        all_labels, all_preds, average='weighted', zero_division=0
-    )
-    metrics['weighted_precision'] = precision_weighted
-    metrics['weighted_recall'] = recall_weighted
-    metrics['weighted_f1'] = f1_weighted
-
-    # Confusion matrix
-    cm = confusion_matrix(all_labels, all_preds)
-
-    return metrics, all_preds, all_probs, all_labels, all_image_names, cm
+    print(f"{'='*60}\n")
 
 
-def plot_confusion_matrix(cm, class_names, output_path):
-    """Plot confusion matrix"""
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt='d',
-        cmap='Blues',
-        xticklabels=class_names,
-        yticklabels=class_names
-    )
-    plt.xlabel('Predicted')
-    plt.ylabel('True')
-    plt.title('Confusion Matrix')
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-    print(f"Confusion matrix saved to: {output_path}")
+def save_predictions_csv(all_preds, all_labels, all_probs, file_paths, output_path, class_names=['TUM', 'STR', 'LYM', 'NEC']):
+    """Save predictions as CSV for easy reading"""
+
+    csv_path = output_path / 'predictions.csv'
+
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+
+        # Header
+        header = ['Image', 'True_Labels', 'Pred_Labels', 'Correct', 'Exact_Match']
+        header.extend([f'{cls}_Prob' for cls in class_names])
+        header.extend([f'{cls}_True' for cls in class_names])
+        header.extend([f'{cls}_Pred' for cls in class_names])
+        writer.writerow(header)
+
+        # Data rows
+        for i in range(len(all_preds)):
+            true_label = all_labels[i]
+            pred_label = all_preds[i]
+            probs = all_probs[i]
+            img_name = file_paths[i] if i < len(file_paths) else f"sample_{i}"
+
+            # True and predicted class names
+            true_classes = ','.join([class_names[j] for j in range(len(class_names)) if true_label[j] == 1])
+            pred_classes = ','.join([class_names[j] for j in range(len(class_names)) if pred_label[j] == 1])
+
+            # Check correctness
+            exact_match = np.array_equal(true_label, pred_label)
+            partial_correct = np.any(true_label == pred_label)
+
+            # Build row
+            row = [
+                img_name,
+                true_classes if true_classes else 'None',
+                pred_classes if pred_classes else 'None',
+                'Yes' if partial_correct else 'No',
+                'Yes' if exact_match else 'No'
+            ]
+
+            # Add probabilities
+            row.extend([f'{probs[j]:.4f}' for j in range(len(class_names))])
+
+            # Add true labels (0/1)
+            row.extend([int(true_label[j]) for j in range(len(class_names))])
+
+            # Add predicted labels (0/1)
+            row.extend([int(pred_label[j]) for j in range(len(class_names))])
+
+            writer.writerow(row)
+
+    print(f"✓ Saved predictions CSV to: {csv_path}")
 
 
-def save_predictions(predictions, labels, probs, image_names, class_names, output_path):
-    """Save predictions to text file"""
-    with open(output_path, 'w') as f:
-        f.write("Image Name\tTrue Labels\tPredicted Labels\tProbabilities\n")
-        for i in range(len(image_names)):
-            img_name = image_names[i]
-            true_label = labels[i]
-            pred_label = predictions[i]
-            prob = probs[i]
+def save_results(metrics, output_path, all_preds=None, all_labels=None, all_probs=None, file_paths=None):
+    """Save evaluation results to file"""
 
-            if len(true_label.shape) > 0:  # Multi-label
-                true_str = ','.join([class_names[j] for j in range(len(class_names)) if true_label[j] == 1])
-                pred_str = ','.join([class_names[j] for j in range(len(class_names)) if pred_label[j] == 1])
-                prob_str = ','.join([f"{class_names[j]}:{prob[j]:.4f}" for j in range(len(class_names))])
-            else:  # Single-label
-                true_str = class_names[int(true_label)]
-                pred_str = class_names[int(pred_label)]
-                prob_str = ','.join([f"{class_names[j]}:{prob[j]:.4f}" for j in range(len(class_names))])
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-            f.write(f"{img_name}\t{true_str}\t{pred_str}\t{prob_str}\n")
+    # Save metrics as JSON
+    with open(output_path / 'test_metrics.json', 'w') as f:
+        json.dump(metrics, f, indent=2)
 
-    print(f"Predictions saved to: {output_path}")
+    print(f"✓ Saved metrics to: {output_path / 'test_metrics.json'}")
+
+    # Save predictions if provided
+    if all_preds is not None and all_labels is not None:
+        np.save(output_path / 'predictions.npy', all_preds)
+        np.save(output_path / 'labels.npy', all_labels)
+        np.save(output_path / 'probabilities.npy', all_probs)
+        print(f"✓ Saved numpy arrays to: {output_path}")
+
+        # Save CSV
+        if all_probs is not None and file_paths is not None:
+            save_predictions_csv(all_preds, all_labels, all_probs, file_paths, output_path)
 
 
 def main(args):
-    # Load configuration
-    config = load_config(args.config)
+    # Device
+    device = torch.device('cuda' if torch.cuda.is_available() and not args.cpu else 'cpu')
+    print(f"Device: {device}")
 
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    # Load test dataset
+    print(f"\n{'='*60}")
+    print("LOADING TEST DATASET")
+    print(f"{'='*60}")
 
-    # Load model
-    print(f"Loading model from: {args.checkpoint}")
-    model = load_model(config, args.checkpoint)
-
-    # Create output directory
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load dataset
-    split = args.split
-    dataset = build_token_classification_dataset(config['data'], split=split)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
+    test_dataset = build_token_dataset(
+        split='test',
+        token_dir=args.test_token_dir
     )
 
-    print(f"Evaluating on {split} set: {len(dataset)} samples")
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn
+    )
 
-    # Class names
-    class_names = ['TUM', 'STR', 'LYM', 'NEC']
+    print(f"Test samples: {len(test_dataset)}")
+
+    # Build model
+    print(f"\n{'='*60}")
+    print("LOADING MODEL")
+    print(f"{'='*60}")
+
+    model = TokenViT(
+        num_tokens=args.num_tokens,
+        embed_dim=args.embed_dim,
+        num_classes=args.num_classes,
+        pretrained_model=args.pretrained_model,
+        freeze_backbone=False
+    )
+
+    # Load checkpoint
+    print(f"Loading checkpoint: {args.checkpoint}")
+    checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
+
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
+
+    # Print checkpoint info
+    if 'epoch' in checkpoint:
+        print(f"Checkpoint epoch: {checkpoint['epoch'] + 1}")
+    if 'metrics' in checkpoint:
+        val_f1 = checkpoint['metrics'].get('f1', 'N/A')
+        if isinstance(val_f1, (int, float)):
+            print(f"Checkpoint validation F1: {val_f1:.4f}")
+        else:
+            print(f"Checkpoint validation F1: {val_f1}")
 
     # Evaluate
-    multi_label = config['model'].get('multi_label', True)
+    print(f"\n{'='*60}")
+    print("EVALUATING ON TEST SET")
+    print(f"{'='*60}")
 
-    if multi_label:
-        metrics, preds, probs, labels, image_names = evaluate_multi_label(
-            model, dataloader, device, class_names
-        )
-        cm = None
-    else:
-        metrics, preds, probs, labels, image_names, cm = evaluate_single_label(
-            model, dataloader, device, class_names
-        )
+    metrics, all_preds, all_labels, all_probs, all_file_paths = evaluate(
+        model, test_loader, device
+    )
 
-    # Print metrics
-    print("\n" + "="*60)
-    print("EVALUATION RESULTS")
-    print("="*60)
-    for key, value in metrics.items():
-        if isinstance(value, (int, np.integer)):
-            print(f"{key:30s}: {value}")
-        else:
-            print(f"{key:30s}: {value:.4f}")
-    print("="*60)
+    # Print results
+    print_metrics(metrics)
 
-    # Save metrics to file
-    metrics_path = output_dir / f"{split}_metrics.txt"
-    with open(metrics_path, 'w') as f:
-        for key, value in metrics.items():
-            if isinstance(value, (int, np.integer)):
-                f.write(f"{key}: {value}\n")
-            else:
-                f.write(f"{key}: {value:.4f}\n")
-    print(f"\nMetrics saved to: {metrics_path}")
-
-    # Save predictions
-    predictions_path = output_dir / f"{split}_predictions.txt"
-    save_predictions(preds, labels, probs, image_names, class_names, predictions_path)
-
-    # Plot confusion matrix (for single-label only)
-    if not multi_label and cm is not None:
-        cm_path = output_dir / f"{split}_confusion_matrix.png"
-        plot_confusion_matrix(cm, class_names, cm_path)
+    # Save results
+    if args.output_dir:
+        save_results(metrics, args.output_dir, all_preds, all_labels, all_probs, all_file_paths)
+        print(f"\nAll results saved to: {args.output_dir}")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Evaluate token classifier')
-    parser.add_argument(
-        '--config',
-        type=str,
-        required=True,
-        help='Path to config file'
+    parser = argparse.ArgumentParser(
+        description='Evaluate trained token classifier on test set',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example:
+  python token_classification/evaluate_token_classifier.py \\
+      --test-token-dir token_maps/test \\
+      --checkpoint outputs/token_vit/best_model.pth \\
+      --output-dir outputs/token_vit/test_results
+        """
     )
-    parser.add_argument(
-        '--checkpoint',
-        type=str,
-        required=True,
-        help='Path to model checkpoint'
-    )
-    parser.add_argument(
-        '--split',
-        type=str,
-        default='test',
-        choices=['train', 'valid', 'test'],
-        help='Dataset split to evaluate on'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=32,
-        help='Batch size for evaluation'
-    )
-    parser.add_argument(
-        '--output-dir',
-        type=str,
-        default='evaluation_results',
-        help='Directory to save results'
-    )
+
+    # Data
+    parser.add_argument('--test-token-dir', type=str, required=True,
+                        help='Directory with test token maps (with labels in filename)')
+    parser.add_argument('--checkpoint', type=str, required=True,
+                        help='Path to model checkpoint (.pth file)')
+
+    # Model
+    parser.add_argument('--num-tokens', type=int, default=8192,
+                        help='Codebook size')
+    parser.add_argument('--embed-dim', type=int, default=768,
+                        help='Embedding dimension (768 for ViT-Base)')
+    parser.add_argument('--num-classes', type=int, default=4,
+                        help='Number of classes')
+    parser.add_argument('--pretrained-model', type=str,
+                        default='google/vit-base-patch16-224',
+                        help='Pretrained ViT model from HuggingFace')
+
+    # Evaluation
+    parser.add_argument('--batch-size', type=int, default=32,
+                        help='Batch size')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='DataLoader workers')
+    parser.add_argument('--cpu', action='store_true',
+                        help='Force CPU')
+
+    # Output
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Directory to save results (optional)')
 
     args = parser.parse_args()
     main(args)

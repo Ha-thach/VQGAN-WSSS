@@ -1,0 +1,32 @@
+# Configuration for CNN-based Token Classifier
+
+model:
+  model_type: cnn
+  num_tokens: 8192           # Codebook size
+  embed_dim: 256             # Token embedding dimension
+  num_classes: 4             # TUM, STR, LYM, NEC
+  hidden_dims: [512, 512, 512]  # CNN hidden dimensions
+  dropout: 0.1               # Dropout rate
+  multi_label: true          # Multi-label classification
+  learning_rate: 0.0001      # Initial learning rate
+  weight_decay: 0.01         # Weight decay for AdamW
+
+data:
+  token_dir: codebook_analysis_bcss_gumbel8  # Directory with token .npy files
+  data_dir: data/sub_BCSS_WSSS                # BCSS-WSSS dataset directory
+  num_classes: 4
+  multi_label: true
+
+training:
+  batch_size: 32
+  max_epochs: 100
+  num_workers: 4
+  accelerator: auto          # 'cpu', 'gpu', 'mps', or 'auto'
+  devices: 1
+  seed: 42
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  precision: 32              # 16, 32, or 'bf16'
+  early_stopping: true
+  patience: 15
+  output_dir: logs/token_classifier_cnn
